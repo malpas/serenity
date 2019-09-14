@@ -1,4 +1,6 @@
 #include "Parser.h"
+#include <AK/Optional.h>
+#include <AK/StringBuilder.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -47,6 +49,12 @@ void Parser::begin_redirect_write(int fd)
 
 Vector<Command> Parser::parse()
 {
+    auto subbed_input = process_substitutions(m_input);
+    if (!subbed_input.has_value()) {
+        fprintf(stderr, "Could not perform command substitution\n");
+        return {};
+    }
+    m_input = subbed_input.value();
     for (int i = 0; i < m_input.length(); ++i) {
         char ch = m_input.characters()[i];
         switch (m_state) {
@@ -189,4 +197,81 @@ Vector<Command> Parser::parse()
     }
 
     return move(m_commands);
+}
+
+// Escape shell-specific characters. Used when substituting outputs
+// that contain special characters.
+String escape_special(const String& string)
+{
+    StringBuilder escaped;
+    for (int i = 0; i < string.length(); ++i) {
+        char ch = string[i];
+        if (ch == '<' || ch == '>' || ch == '|'
+            || ch == '`') {
+            escaped.append('\\');
+        }
+        escaped.append(ch);
+    }
+    return escaped.build();
+}
+
+// FIXME This can be optimised if the Parser::parse state machine is ever
+// replaced with a recursive parsing algorithm. Right now, this is a
+// pre-processing function that looks through the entire text it's given.
+Optional<String> Parser::process_substitutions(const String& cmd)
+{
+    StringBuilder new_cmd;
+    StringBuilder sub_cmd;
+    int sub_level = 0;
+    for (int i = 0; i < cmd.length(); ++i) {
+        char ch = cmd[i];
+        char prev_ch = i > 0 ? cmd[i - 1] : '\0';
+        char next_ch = i < cmd.length() - 1 ? cmd[i + 1] : '\0';
+        if (ch == '$' && next_ch == '(' && prev_ch != '\\') {
+            if (sub_level > 0) {
+                sub_cmd.append("$(");
+            }
+            ++sub_level;
+            ++i;
+            continue;
+        }
+        if (sub_level == 0) {
+            new_cmd.append(ch);
+            continue;
+        }
+        if (ch == ')') {
+            --sub_level;
+            if (sub_level > 0) {
+                sub_cmd.append(')');
+                continue;
+            }
+            StringBuilder output;
+            auto recursed_cmd = process_substitutions(sub_cmd.build());
+            if (!recursed_cmd.has_value())
+                return Optional<String>();
+            sub_cmd = StringBuilder();
+            FILE* fp = popen(recursed_cmd.value().characters(), "r");
+            char* line = NULL;
+            size_t n;
+            int read;
+            while ((read = getline(&line, &n, fp)) != -1) {
+                for (int i = 0; i < read; ++i) {
+                    if (line[i] == '\n')
+                        continue;
+                    output.append(line[i]);
+                }
+                output.append(' ');
+            }
+            free(line);
+            pclose(fp);
+            auto final_output = output.build();
+            final_output = final_output.substring(0, final_output.length() - 1);
+            new_cmd.append(escape_special(final_output).characters());
+            continue;
+        }
+        sub_cmd.append(ch);
+    }
+    if (sub_level > 0)
+        return Optional<String>();
+    return new_cmd.build();
 }

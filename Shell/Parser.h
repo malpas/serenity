@@ -1,5 +1,6 @@
 #pragma once
 
+#include <AK/Optional.h>
 #include <AK/String.h>
 #include <AK/Vector.h>
 
@@ -47,6 +48,7 @@ private:
     void do_pipe();
     void begin_redirect_read(int fd);
     void begin_redirect_write(int fd);
+    Optional<String> process_substitutions(const String& cmd);
 
     enum State {
         Free,
